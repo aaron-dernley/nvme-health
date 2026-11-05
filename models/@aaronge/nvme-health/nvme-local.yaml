@@ -1,0 +1,8 @@
+type: '@aaronge/nvme-health'
+typeVersion: 2026.11.05.1
+id: c80f0f5a-81de-47de-b9fa-614459efdcc2
+name: nvme-local
+version: 1
+tags: {}
+globalArguments: {}
+methods: {}

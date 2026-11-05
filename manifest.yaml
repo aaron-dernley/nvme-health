@@ -1,0 +1,29 @@
+manifestVersion: 1
+name: "@aaronge/nvme-health"
+version: "2026.11.05.1"
+description: "NVMe drive health for any Linux host: SMART/health log (critical warnings, spare, wear, media errors, unsafe shutdowns, thermal throttling) with per-reading deltas, hwmon temperatures, controller identity and the error log, as a typed, versioned Swamp behavior with scheduled workflow assertions."
+
+repository: https://github.com/aaron-dernley/nvme-health
+license: MIT
+
+behaviors:
+  - nvme_health.ts
+
+workflows:
+  - workflow-ce2287d2-c707-4f48-aaf9-56a749928540.yaml
+  - workflow-e8a0cb34-30e4-4cc3-9ca4-ae12b1f19259.yaml
+
+additionalFiles:
+  - README.md
+  - LICENSE
+
+labels:
+  - nvme
+  - smart
+  - storage
+  - health
+  - raspberry-pi
+
+platforms:
+  - linux-aarch64
+  - linux-x86_64

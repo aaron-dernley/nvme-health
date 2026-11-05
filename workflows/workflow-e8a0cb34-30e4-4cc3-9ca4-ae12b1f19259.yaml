@@ -1,0 +1,81 @@
+id: e8a0cb34-30e4-4cc3-9ca4-ae12b1f19259
+name: '@aaronge/nvme-inventory'
+description: >-
+  Daily NVMe inventory from nvme-local: controller identity (model, serial,
+  firmware, link, capacity, temperature thresholds, power-state and
+  self-test support) and the controller's error log. Separate from the
+  15-minute @aaronge/nvme-health check because none of this changes
+  minute to minute. Asserts the controller is live and the error log is
+  empty.
+version: 1
+tags: {}
+trigger:
+  schedule: "30 6 * * *"
+jobs:
+  - name: collect
+    description: Read identity and the error log.
+    dependsOn: []
+    steps:
+      - name: readIdentity
+        task:
+          type: behavior
+          behavior: nvme-local
+          methodName: readIdentity
+        dependsOn: []
+      - name: readErrorLog
+        task:
+          type: behavior
+          behavior: nvme-local
+          methodName: readErrorLog
+        dependsOn: []
+
+  - name: assert
+    description: Fail the run when the controller isn't live or has logged errors.
+    dependsOn:
+      - job: collect
+        condition:
+          type: completed
+    steps:
+      - name: controller-live
+        task:
+          type: assert
+          expr: >-
+            data.latest("nvme-local", "identity").attributes.state == "live"
+          message: >-
+            NVMe controller ${{ data.latest("nvme-local", "identity").attributes.device }}
+            is in state "${{ data.latest("nvme-local", "identity").attributes.state }}", not live.
+          severity: high
+        dependsOn: []
+      - name: error-log-empty
+        task:
+          type: assert
+          expr: >-
+            data.latest("nvme-local", "errorLog").attributes.entryCount == 0
+          message: >-
+            NVMe error log has ${{ data.latest("nvme-local", "errorLog").attributes.entryCount }}
+            entries; see nvme-local's errorLog data.
+          severity: medium
+        dependsOn: []
+
+  - name: report
+    description: Print a one-screen summary, whatever the asserts decided.
+    dependsOn:
+      - job: collect
+        condition:
+          type: completed
+    steps:
+      - name: summarize
+        task:
+          type: behavior
+          behaviorType: "command/shell"
+          behaviorName: nvme-inventory-summary
+          methodName: execute
+          inputs:
+            run: >-
+              echo "nvme-inventory: ${{ data.latest('nvme-local', 'identity').attributes.device }}" &&
+              echo "  ${{ data.latest('nvme-local', 'identity').attributes.model }} (fw ${{ data.latest('nvme-local', 'identity').attributes.firmware }})" &&
+              echo "  ${{ data.latest('nvme-local', 'identity').attributes.transport }} ${{ data.latest('nvme-local', 'identity').attributes.address }}, state ${{ data.latest('nvme-local', 'identity').attributes.state }}" &&
+              echo "  capacity: ${{ data.latest('nvme-local', 'identity').attributes.capacityBytes }} bytes" &&
+              echo "  temp thresholds: warning ${{ data.latest('nvme-local', 'identity').attributes.warningTempCelsius }}C, critical ${{ data.latest('nvme-local', 'identity').attributes.criticalTempCelsius }}C" &&
+              echo "  error log entries: ${{ data.latest('nvme-local', 'errorLog').attributes.entryCount }}"
+        dependsOn: []

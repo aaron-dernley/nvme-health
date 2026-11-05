@@ -1,0 +1,202 @@
+id: ce2287d2-c707-4f48-aaf9-56a749928540
+name: '@aaronge/nvme-health'
+description: >-
+  Read the NVMe health log and hwmon temperatures from nvme-local and
+  assert the drive is healthy: no critical warning, spare above its
+  threshold plus a margin, wear below maxPercentUsed, composite temperature
+  below tempWarnCelsius, and no NEW media errors, error-log entries or
+  over-temperature minutes since the previous reading. New unsafe
+  shutdowns are reported but don't fail the run: they point at power loss,
+  not at the drive. Every 15 minutes, since wear, spare and error counters
+  move slowly and reading the log costs the drive nothing.
+version: 1
+tags: {}
+trigger:
+  schedule: "*/15 * * * *"
+inputs:
+  properties:
+    maxPercentUsed:
+      type: number
+      default: 80
+      description: >-
+        percentUsed (vendor estimate of rated endurance used) at or above
+        which the wear assert fails.
+    spareMarginPercent:
+      type: number
+      default: 5
+      description: >-
+        How far availableSparePercent must stay above the drive's own
+        spareThresholdPercent. The drive only raises critical_warning once
+        spare drops below its threshold; this fails earlier.
+    tempWarnCelsius:
+      type: number
+      default: 70
+      description: >-
+        Composite temperature at or above which the temperature assert
+        fails. Most drives' own warning threshold (WCTEMP) is 80-85°C; see
+        nvme-local's identity data for this drive's.
+    maxWriteGBPerDay:
+      type: number
+      default: 0
+      description: >-
+        Write-rate ceiling in GB/day, measured between readings. 0 turns the
+        check off. Useful for catching runaway writers before they eat into
+        the drive's rated endurance.
+jobs:
+  - name: collect
+    description: Read the health log and hwmon temperatures.
+    dependsOn: []
+    steps:
+      - name: readSmart
+        task:
+          type: behavior
+          behavior: nvme-local
+          methodName: readSmart
+        dependsOn: []
+      - name: readTemperature
+        allowFailure: true
+        task:
+          type: behavior
+          behavior: nvme-local
+          methodName: readTemperature
+        dependsOn: []
+
+  - name: assert
+    description: Fail the run when the drive reports a health problem.
+    dependsOn:
+      - job: collect
+        condition:
+          type: completed
+    steps:
+      - name: no-critical-warning
+        task:
+          type: assert
+          expr: >-
+            data.latest("nvme-local", "smart").attributes.criticalWarning == 0
+            && (data.latest("nvme-local", "smart").attributes.enduranceGroupCriticalWarning == null
+              || data.latest("nvme-local", "smart").attributes.enduranceGroupCriticalWarning == 0)
+          message: >-
+            NVMe critical warning: critical_warning=${{ data.latest("nvme-local", "smart").attributes.criticalWarning }}
+            (flags ${{ data.latest("nvme-local", "smart").attributes.criticalWarningFlags }}),
+            endurance group=${{ data.latest("nvme-local", "smart").attributes.enduranceGroupCriticalWarning }}.
+            Back up the drive.
+          severity: high
+        dependsOn: []
+      - name: spare-above-threshold
+        task:
+          type: assert
+          expr: >-
+            data.latest("nvme-local", "smart").attributes.availableSparePercent
+            > data.latest("nvme-local", "smart").attributes.spareThresholdPercent + inputs.spareMarginPercent
+          message: >-
+            NVMe spare ${{ data.latest("nvme-local", "smart").attributes.availableSparePercent }}%
+            is within ${{ inputs.spareMarginPercent }} points of the drive's
+            threshold ${{ data.latest("nvme-local", "smart").attributes.spareThresholdPercent }}%.
+          severity: high
+        dependsOn: []
+      - name: wear-below-limit
+        task:
+          type: assert
+          expr: >-
+            data.latest("nvme-local", "smart").attributes.percentUsed < inputs.maxPercentUsed
+          message: >-
+            NVMe wear ${{ data.latest("nvme-local", "smart").attributes.percentUsed }}% used
+            has reached maxPercentUsed ${{ inputs.maxPercentUsed }}%.
+          severity: medium
+        dependsOn: []
+      - name: no-new-media-errors
+        task:
+          type: assert
+          expr: >-
+            data.latest("nvme-local", "smart").attributes.deltas.mediaErrors == null
+            || data.latest("nvme-local", "smart").attributes.deltas.mediaErrors == 0
+          message: >-
+            ${{ data.latest("nvme-local", "smart").attributes.deltas.mediaErrors }} new NVMe
+            media errors since the previous reading (lifetime
+            ${{ data.latest("nvme-local", "smart").attributes.counters.mediaErrors }}).
+            Unrecovered data-integrity errors: back up the drive.
+          severity: high
+        dependsOn: []
+      - name: no-new-error-log-entries
+        task:
+          type: assert
+          expr: >-
+            data.latest("nvme-local", "smart").attributes.deltas.errorLogEntries == null
+            || data.latest("nvme-local", "smart").attributes.deltas.errorLogEntries == 0
+          message: >-
+            ${{ data.latest("nvme-local", "smart").attributes.deltas.errorLogEntries }} new NVMe
+            error-log entries since the previous reading. Run
+            `swamp behavior run nvme-local readErrorLog` for details.
+          severity: medium
+        dependsOn: []
+      - name: temperature-ok
+        task:
+          type: assert
+          expr: >-
+            (data.latest("nvme-local", "smart").attributes.temperatureCelsius == null
+              || data.latest("nvme-local", "smart").attributes.temperatureCelsius < inputs.tempWarnCelsius)
+            && (data.latest("nvme-local", "smart").attributes.deltas.warningTempMinutes == null
+              || data.latest("nvme-local", "smart").attributes.deltas.warningTempMinutes == 0)
+          message: >-
+            NVMe composite temperature ${{ data.latest("nvme-local", "smart").attributes.temperatureCelsius }}°C
+            (limit ${{ inputs.tempWarnCelsius }}°C), with
+            ${{ data.latest("nvme-local", "smart").attributes.deltas.warningTempMinutes }} new minutes
+            above the drive's own warning threshold. Check cooling.
+          severity: medium
+        dependsOn: []
+      - name: write-rate-ok
+        task:
+          type: assert
+          expr: >-
+            inputs.maxWriteGBPerDay == 0
+            || data.latest("nvme-local", "smart").attributes.deltas.writeBytesPerDay == null
+            || data.latest("nvme-local", "smart").attributes.deltas.writeBytesPerDay
+              < inputs.maxWriteGBPerDay * 1000000000
+          message: >-
+            NVMe write rate ${{ data.latest("nvme-local", "smart").attributes.deltas.writeBytesPerDay }}
+            bytes/day exceeds maxWriteGBPerDay ${{ inputs.maxWriteGBPerDay }} GB.
+          severity: low
+        dependsOn: []
+      - name: no-new-unsafe-shutdowns
+        # Reported, not gating: an unsafe shutdown is a power-loss witness
+        # (pulled cable, brownout), not a drive fault. Pair it with a power
+        # check for alerting, e.g. rpi-health's under-voltage flags.
+        allowFailure: true
+        task:
+          type: assert
+          expr: >-
+            data.latest("nvme-local", "smart").attributes.deltas.unsafeShutdowns == null
+            || data.latest("nvme-local", "smart").attributes.deltas.unsafeShutdowns == 0
+          message: >-
+            ${{ data.latest("nvme-local", "smart").attributes.deltas.unsafeShutdowns }} new NVMe
+            unsafe shutdowns since the previous reading (lifetime
+            ${{ data.latest("nvme-local", "smart").attributes.counters.unsafeShutdowns }}): the
+            drive lost power without a clean shutdown.
+          severity: low
+        dependsOn: []
+
+  - name: report
+    description: >-
+      Print a one-screen summary. Depends on collect only (not assert), so it
+      still runs when an assertion fails.
+    dependsOn:
+      - job: collect
+        condition:
+          type: completed
+    steps:
+      - name: summarize
+        task:
+          type: behavior
+          behaviorType: "command/shell"
+          behaviorName: nvme-health-summary
+          methodName: execute
+          inputs:
+            run: >-
+              echo "nvme-health: ${{ data.latest('nvme-local', 'smart').attributes.device }}" &&
+              echo "  critical_warning: ${{ data.latest('nvme-local', 'smart').attributes.criticalWarning }}" &&
+              echo "  spare: ${{ data.latest('nvme-local', 'smart').attributes.availableSparePercent }}% (threshold ${{ data.latest('nvme-local', 'smart').attributes.spareThresholdPercent }}%)" &&
+              echo "  used: ${{ data.latest('nvme-local', 'smart').attributes.percentUsed }}%" &&
+              echo "  temperature: ${{ data.latest('nvme-local', 'smart').attributes.temperatureCelsius }}C" &&
+              echo "  media errors: ${{ data.latest('nvme-local', 'smart').attributes.counters.mediaErrors }}, unsafe shutdowns: ${{ data.latest('nvme-local', 'smart').attributes.counters.unsafeShutdowns }}" &&
+              echo "  writes/day since last reading: ${{ data.latest('nvme-local', 'smart').attributes.deltas.writeBytesPerDay }} bytes"
+        dependsOn: []

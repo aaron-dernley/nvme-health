@@ -1,0 +1,5 @@
+version: 1
+accept:
+  # Deliberate: written with the current behavior spelling. Every swamp
+  # that installs it (this Pi's ops serve) runs a release that supports it.
+  - rule: behavior-spelling
